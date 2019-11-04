@@ -2,6 +2,10 @@ package com.cermati;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.Hashtable;
+import java.util.Queue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.io.FileWriter;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -14,31 +18,53 @@ import org.jsoup.Jsoup;
 import org.jsoup.nodes.Element;
 
 public class Solution {
-    public static void main(String[] args) throws IOException {
+    static Queue<String> departmentListCopy = null;
+    static Hashtable<String, Object> departmentsAndJobsTable = null;
+    public static void main(String[] args) throws IOException, InterruptedException {
         String START_WEB_ADDRESS = "https://www.cermati.com/karir";
         Document doc = RequiredTools.htmlParser(START_WEB_ADDRESS);
 
         ArrayList<String> departmentList = RequiredTools.departmentListExtractor(doc);
-
+        departmentsAndJobsTable = new Hashtable<String, Object>();
+    
         String jobsTabId;
         Elements jobTab = null;
         for (int tabNumber = 0; tabNumber < departmentList.size(); tabNumber++){
             jobsTabId = "tab" + tabNumber;
             jobTab = RequiredTools.elementsDetectionById(doc, jobsTabId);
-            RequiredTools.jobClassifier(jobTab);
+            departmentsAndJobsTable.put(departmentList.get(tabNumber), jobTab);
         }
-        ArrayList<ArrayList<JobClass>> listOfJobObjectsList = RequiredTools.getListOfJobObjectsList();
+        departmentListCopy = new LinkedBlockingQueue<String>(departmentList);
+        
+        JobExtractorThread jobExtractorChildThreadOne = new JobExtractorThread();
+        jobExtractorChildThreadOne.start();
+        JobExtractorThread jobExtractorChildThreadTwo = new JobExtractorThread();
+        jobExtractorChildThreadTwo.start();
+        String departmentName = null;
+        while (departmentListCopy.size() != 0){
+            departmentName = departmentListCopy.poll();
+            //System.out.println("Executing from Main Thread:");
+            //System.out.println(departmentName);
+            RequiredTools.jobExtractor(departmentName);
+        }
+        jobExtractorChildThreadOne.join();
+        jobExtractorChildThreadTwo.join();
 
-        //For Debugging Purposes
-        /*for (int i = 0; i < listOfJobObjectsList.size(); i++) { 
-            for (int j = 0; j < listOfJobObjectsList.get(i).size(); j++) { 
-                System.out.print((listOfJobObjectsList.get(i).get(j)).toString() + " ");
-            } 
-            System.out.println(); 
-        }*/
-
-        String outputStatus = RequiredTools.jsonFileCreator(departmentList, listOfJobObjectsList);
+        String outputStatus = RequiredTools.jsonFileCreator(departmentsAndJobsTable);
         System.out.println(outputStatus);
+    }
+}
+
+class JobExtractorThread extends Thread{
+    @Override
+    public void run(){
+        String departmentName = null;
+        while (Solution.departmentListCopy.size() != 0){
+            departmentName = Solution.departmentListCopy.poll();
+            //System.out.println("Executing from Child Thread:");
+            //System.out.println(departmentName);
+            RequiredTools.jobExtractor(departmentName);
+        }
     }
 }
 
@@ -54,14 +80,8 @@ class JobClass{
     }
 }
 
-@SuppressWarnings("unchecked") //Used to suppress warning messages at JSON object creation stage
+@SuppressWarnings("unchecked") //Used to suppress warning messages at JSON object creation stage regarding type-safety
 class RequiredTools{
-    static ArrayList<ArrayList<JobClass>> listOfJobObjectsList = new ArrayList<ArrayList<JobClass>>();
-
-    static ArrayList<ArrayList<JobClass>> getListOfJobObjectsList(){
-        return listOfJobObjectsList;
-    }
-
     static Document htmlParser(String webAddress){
         Document doc = null;
         try {
@@ -88,8 +108,8 @@ class RequiredTools{
     }
 
     static Elements elementsDetectionById(Document doc, String id){
-        Elements detectedElement = doc.getElementById(id).select("a");
-        return detectedElement;
+        Elements detectedElements = doc.getElementById(id).select("a");
+        return detectedElements;
     }
 
     static String locationExtractor(Document doc){
@@ -118,7 +138,7 @@ class RequiredTools{
                 formattedDescription = formattedDescription + descriptionLines.text() + "\n";
         }
         } catch (Exception e) {
-            formattedDescription = "No Job posted in this section!";
+            formattedDescription = "No description!";
         }
         return formattedDescription;
     }
@@ -128,7 +148,7 @@ class RequiredTools{
         return detectedElements;
     }
 
-    static void jobClassifier(Elements jobTab){
+    static void jobExtractor(String departmentName){
         String title;
         String location;
         String description;
@@ -136,6 +156,8 @@ class RequiredTools{
         String postedBy;
 
         ArrayList<JobClass> listOfJobObjects = new ArrayList<JobClass>();
+
+        Elements jobTab = (Elements)Solution.departmentsAndJobsTable.get(departmentName);
 
         for(Element jobElement : jobTab){
             String jobLink = jobElement.attr("href");
@@ -160,7 +182,7 @@ class RequiredTools{
 
             listOfJobObjects.add(jobObject);
         }
-        listOfJobObjectsList.add(listOfJobObjects);
+        Solution.departmentsAndJobsTable.replace(departmentName, listOfJobObjects);
     }
 
     static JobClass jobObjectCreator(String title, String location, String description, String qualification, String postedby){
@@ -173,23 +195,28 @@ class RequiredTools{
         return job;
     }
 
-    static String jsonFileCreator(ArrayList<String> departmentList, ArrayList<ArrayList<JobClass>>listOfJobObjectsList) throws IOException {
+    static String jsonFileCreator(Hashtable<String, Object>departmentsAndJobsTable) throws IOException {
+        String departmentKey = null;
+        ArrayList<JobClass> listOfJobObjects = null;
         JSONObject readyToWriteJsonObject = new JSONObject();
         JSONArray classifiedJobsJsonArray = null;
         JSONObject jobDetailsJsonObject = null;
 
-        for (int jobTypeNumber = 0; jobTypeNumber < listOfJobObjectsList.size(); jobTypeNumber++){
+        Enumeration<String> departmentKeys = departmentsAndJobsTable.keys();
+        while (departmentKeys.hasMoreElements()){
+            departmentKey = departmentKeys.nextElement();
+            listOfJobObjects = (ArrayList<JobClass>)departmentsAndJobsTable.get(departmentKey);
             classifiedJobsJsonArray = new JSONArray();
-            for (int jobNumber = 0; jobNumber < listOfJobObjectsList.get(jobTypeNumber).size(); jobNumber++){
+            for(JobClass jobObject : listOfJobObjects){
                 jobDetailsJsonObject = new JSONObject();
-                jobDetailsJsonObject.put("title", listOfJobObjectsList.get(jobTypeNumber).get(jobNumber).title);
-                jobDetailsJsonObject.put("location", listOfJobObjectsList.get(jobTypeNumber).get(jobNumber).location);
-                jobDetailsJsonObject.put("description", listOfJobObjectsList.get(jobTypeNumber).get(jobNumber).description);
-                jobDetailsJsonObject.put("qualification", listOfJobObjectsList.get(jobTypeNumber).get(jobNumber).qualification);
-                jobDetailsJsonObject.put("postedby", listOfJobObjectsList.get(jobTypeNumber).get(jobNumber).postedBy);
+                jobDetailsJsonObject.put("title", jobObject.title);
+                jobDetailsJsonObject.put("location", jobObject.location);
+                jobDetailsJsonObject.put("description", jobObject.description);
+                jobDetailsJsonObject.put("qualification", jobObject.qualification);
+                jobDetailsJsonObject.put("postedby", jobObject.postedBy);
                 classifiedJobsJsonArray.add(jobDetailsJsonObject);
             }
-            readyToWriteJsonObject.put(departmentList.get(jobTypeNumber), classifiedJobsJsonArray);
+            readyToWriteJsonObject.put(departmentKey, classifiedJobsJsonArray);
         }
 
         Path currentDirectory = Paths.get(".");
